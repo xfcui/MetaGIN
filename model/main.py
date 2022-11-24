@@ -129,7 +129,6 @@ for epoch in range(cos_period*num_period):
 
     if args.save != '':
         pt.save(model.state_dict(), args.save + '/model%03d.pt' % epoch)
-        pt.save(optim.state_dict(), args.save + '/optim%03d.pt' % epoch)
         if epoch > cos_period and (epoch+1) % cos_period == 0 and best_epoch > test_epoch:
             test_fn, test_epoch = '%s/model%03d.pt' % (args.save, best_epoch), best_epoch
             test_pred = test(model, test_fn, test_loader)

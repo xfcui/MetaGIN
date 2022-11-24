@@ -156,15 +156,11 @@ class HeadBlock(nn.Module):
         self.node = GatedLinearBlock(width, num_head, *WIDTH_NODE)
         self.node_degree = DegreeLayer(width, degree_init)
 
-        self.pair = GatedLinearBlock(width, num_head, *WIDTH_EDGE)
-        self.pair_encoder = nn.Embedding(EMBED_DIST, width*WIDTH_EDGE[0], scale_grad_by_freq=True, padding_idx=0)
-        self.pair_degree = DegreeLayer(width, degree_init)
-
-        self.head = nn.Sequential(nn.GroupNorm(1, width, affine=False),
-                        nn.Linear(width, 1))
+        self.norm = nn.GroupNorm(1, width, affine=False)
+        self.head = nn.Linear(width, 1)
         print('##params[head]:', np.sum([np.prod(p.shape) for p in self.parameters()]))
 
-    def forward(self, x, virt_res, pair_index, pair_attr, pair_size, batch, batch_size):
+    def forward(self, x, virt_res, batch, batch_size):
         x0 = scatter(x, batch, dim=0, dim_size=len(batch_size), reduce='sum')
         x0 = self.virt(virt_res, x0)
 
@@ -172,14 +168,9 @@ class HeadBlock(nn.Module):
         x1 = scatter(x1, batch, dim=0, dim_size=len(batch_size), reduce='sum')
         x1 = self.node_degree(x1, batch_size)
 
-        x2 = x[pair_index[0]] + x[pair_index[1]]
-        x2 = self.pair(x2, self.pair_encoder(pair_attr).unsqueeze(-1))
-        x2 = scatter(x2, batch[pair_index[0]], dim=0, dim_size=len(batch_size), reduce='sum')
-        x2 = self.pair_degree(x2, pair_size)
-
-        xx = (self.head(x0 + x1 + x2) + 1.0) * 5.5
-        if not self.training: xx.clamp_(2e-1, 2e1)
-        return xx
+        xn = self.norm(x0 + x1)
+        xx = (self.head(xn) + 1.0) * 5.5
+        return xx, xn
 
 
 # GIN: https://openreview.net/forum?id=ryGs6iA5Km
@@ -230,23 +221,23 @@ class MetaGIN(nn.Module):
         deg3.clamp_(1, None)
         edge += [[idx3, attr3, deg3]]
 
-        idx0, attr0 = graph['pair'].edge_index, graph['pair'].edge_attr
-        attr0.clamp_(None, EMBED_DIST-2); attr0.masked_fill_(attr0<0, EMBED_DIST-1)
-        deg0 = batch_size * (batch_size - 1) / 2
-        deg0.clamp_(1, None)
-        edge += [[idx0, attr0, deg0]]
+        #idx0, attr0 = graph['pair'].edge_index, graph['pair'].edge_attr
+        #attr0.clamp_(None, EMBED_DIST-2); attr0.masked_fill_(attr0<0, EMBED_DIST-1)
+        #deg0 = batch_size * (batch_size - 1) / 2
+        #deg0.clamp_(1, None)
+        #edge += [[idx0, attr0, deg0]]
 
         h_in, h_virt, h_out = self.atom_encoder(x), 0, 0
-        h_out = self.atom_conv(h_in, h_out, edge[:3])
+        h_out = self.atom_conv(h_in, h_out, edge)
         h_in = self.atom_main(h_in, h_out)
         for layer in range(self.depth):
             h_out = 0
             if self.conv[layer] is not None:
-                h_out = self.conv[layer](h_in, h_out, edge[:3])
+                h_out = self.conv[layer](h_in, h_out, edge)
             if self.virt[layer] is not None:
                 h_out, h_virt = self.virt[layer](h_in, h_out, h_virt, batch, batch_size)
             h_in = self.main[layer](h_in, h_out)
-        h_out = self.head(h_in, h_virt, *edge[3], batch, batch_size)
+        h_out, h_embed = self.head(h_in, h_virt, batch, batch_size)
 
         return h_out
 
