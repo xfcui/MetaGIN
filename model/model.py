@@ -12,7 +12,7 @@ DROPOUT = 0.1
 EMBED_ATOM = 172            # zero for masked
 EMBED_BOND = [33, 3, 4]     # zero for masked
 EMBED_DIST = 8              # zero for self-loop
-DIM_HEAD, WIDTH_GRAPH, WIDTH_NODE, WIDTH_EDGE = 16, (2, 3), (2, 2), (1, 2)
+DIM_HEAD, RESCALE_GRAPH, RESCALE_NODE, RESCALE_EDGE = 16, (2, 4), (1, 3), (1, 2)
 
 
 # ReZero: https://arxiv.org/abs/2003.04887v2
@@ -39,15 +39,15 @@ class DegreeLayer(nn.Module):
 # GLU: https://arxiv.org/abs/1612.08083v3
 # GLU-variants: https://arxiv.org/abs/2002.05202v1
 class GatedLinearBlock(nn.Module):
-    def __init__(self, width, num_head, width_norm=1, width_act=1):
+    def __init__(self, width, num_head, re_norm=1, re_act=1):
         super().__init__()
 
-        self.pre   = nn.Sequential(nn.Conv1d(width, width*width_norm, 1),
-                         nn.GroupNorm(num_head, width*width_norm, affine=False))
-        self.gate  = nn.Sequential(nn.Conv1d(width*width_norm, width*width_act, 1, bias=False, groups=num_head),
+        self.pre   = nn.Sequential(nn.Conv1d(width, width*re_norm, 1),
+                         nn.GroupNorm(num_head*re_norm, width*re_norm, affine=False))
+        self.gate  = nn.Sequential(nn.Conv1d(width*re_norm, width*re_act, 1, bias=False, groups=num_head*re_norm),
                          nn.ReLU(), nn.Dropout(DROPOUT))
-        self.value = nn.Conv1d(width*width_norm, width*width_act, 1, bias=False, groups=num_head)
-        self.post  = nn.Conv1d(width*width_act, width, 1)
+        self.value = nn.Conv1d(width*re_norm, width*re_act, 1, bias=False, groups=num_head*re_norm)
+        self.post  = nn.Conv1d(width*re_act, width, 1)
 
     def forward(self, x, bias=0):
         xx = self.pre(x.unsqueeze(-1))
@@ -57,12 +57,12 @@ class GatedLinearBlock(nn.Module):
 
 # MetaFormer: https://arxiv.org/abs/2210.13452v1
 class MetaFormerBlock(nn.Module):
-    def __init__(self, width, num_head, width_norm=1, width_act=1, use_residual=True, block_name=None):
+    def __init__(self, width, num_head, re_norm=1, re_act=1, use_residual=True, block_name=None):
         super().__init__()
 
         self.scale_pre  = ScaleLayer(width, 1)
         self.scale_post = ScaleLayer(width, 1) if use_residual else None
-        self.block      = GatedLinearBlock(width, num_head, width_norm, width_act)
+        self.block      = GatedLinearBlock(width, num_head, re_norm, re_act)
         if block_name is not None:
             print('##params[%s]:' % block_name, np.sum([np.prod(p.shape) for p in self.parameters()]), use_residual)
 
@@ -78,20 +78,20 @@ class MetaFormerBlock(nn.Module):
 # VoVNet: https://arxiv.org/abs/1904.09730v1
 # GNN-AK: https://openreview.net/forum?id=Mspk_WYKoEH
 class ConvBlock(nn.Module):
-    def __init__(self, width, num_head, width_norm, width_act, bond_size, degree_init=-0.01):  # sum_init
+    def __init__(self, width, num_head, re_norm, re_act, bond_size, degree_init=-0.01):  # sum_init
         super().__init__()
 
         # ops per node
-        self.pre0  = nn.Conv1d(width, width*width_norm, 1)
-        self.pre1  = nn.Conv1d(width, width*width_norm, 1)
-        self.norm  = nn.GroupNorm(num_head, width*width_norm, affine=False)
+        self.pre0  = nn.Conv1d(width, width*re_norm, 1)
+        self.pre1  = nn.Conv1d(width, width*re_norm, 1)
+        self.norm  = nn.GroupNorm(num_head*re_norm, width*re_norm, affine=False)
         # ops per edge
-        self.local_encoder = nn.EmbeddingBag(bond_size, width*width_norm, scale_grad_by_freq=True, padding_idx=0)
-        self.gate  = nn.Sequential(nn.Conv1d(width*width_norm, width*width_act, 1, bias=False, groups=num_head),
+        self.local_encoder = nn.EmbeddingBag(bond_size, width*re_norm, scale_grad_by_freq=True, padding_idx=0)
+        self.gate  = nn.Sequential(nn.Conv1d(width*re_norm, width*re_act, 1, bias=False, groups=num_head*re_norm),
                          nn.ReLU(), nn.Dropout(DROPOUT))
-        self.value = nn.Conv1d(width*width_norm, width*width_act, 1, bias=False, groups=num_head)
+        self.value = nn.Conv1d(width*re_norm, width*re_act, 1, bias=False, groups=num_head*re_norm)
         # ops per node
-        self.post  = nn.Conv1d(width*width_act, width, 1)
+        self.post  = nn.Conv1d(width*re_act, width, 1)
         self.deg   = DegreeLayer(width, degree_init)
 
     def forward(self, x, deg, edge_idx, edge_attr):
@@ -102,7 +102,7 @@ class ConvBlock(nn.Module):
         return xx
 
 class ConvKernel(nn.Module):
-    def __init__(self, width, num_head, hop, kernel, width_norm=1, width_act=1):
+    def __init__(self, width, num_head, hop, kernel, re_norm=1, re_act=1):
         super().__init__()
         self.width = width
         self.hop = hop
@@ -111,10 +111,10 @@ class ConvKernel(nn.Module):
         self.msg = nn.ModuleList()
         for layer in range(hop * kernel):
             hop_idx = layer % hop
-            self.msg.append(ConvBlock(width, num_head, width_norm, width_act, EMBED_BOND[hop_idx]))
+            self.msg.append(ConvBlock(width, num_head, re_norm, re_act, EMBED_BOND[hop_idx]))
         self.mix = nn.ModuleList()
         for layer in range(kernel-1):
-            self.mix.append(MetaFormerBlock(width, num_head, *WIDTH_NODE))
+            self.mix.append(MetaFormerBlock(width, num_head, *RESCALE_NODE))
         print('##params[conv]:', np.sum([np.prod(p.shape) for p in self.parameters()]))
 
     def forward(self, x, x_res, edge):
@@ -137,7 +137,7 @@ class VirtKernel(nn.Module):
         super().__init__()
         self.width = width
 
-        self.virt  = GatedLinearBlock(width, num_head, *WIDTH_GRAPH)
+        self.virt  = GatedLinearBlock(width, num_head, *RESCALE_GRAPH)
         print('##params[virt]:', np.sum([np.prod(p.shape) for p in self.parameters()]))
 
     def forward(self, x, x_res, virt_res, batch, batch_size):
@@ -151,9 +151,9 @@ class HeadBlock(nn.Module):
         super().__init__()
         self.width = width
 
-        self.virt = MetaFormerBlock(width, num_head, *WIDTH_GRAPH, False)
+        self.virt = MetaFormerBlock(width, num_head, *RESCALE_GRAPH, False)
 
-        self.node = GatedLinearBlock(width, num_head, *WIDTH_NODE)
+        self.node = GatedLinearBlock(width, num_head, *RESCALE_NODE)
         self.node_degree = DegreeLayer(width, degree_init)
 
         self.norm = nn.GroupNorm(1, width, affine=False)
@@ -185,19 +185,19 @@ class MetaGIN(nn.Module):
         print('#model:', depth, width, num_head, conv_hop, conv_kernel, use_virt)
 
         self.atom_encoder = nn.EmbeddingBag(EMBED_ATOM, width, scale_grad_by_freq=True, padding_idx=0)
-        self.atom_conv = ConvKernel(width, num_head, conv_hop, 1, *WIDTH_EDGE)
-        self.atom_main = MetaFormerBlock(width, num_head, *WIDTH_NODE, False, 'main')
+        self.atom_conv = ConvKernel(width, num_head, conv_hop, 1, *RESCALE_EDGE)
+        self.atom_main = MetaFormerBlock(width, num_head, *RESCALE_NODE, False, 'main')
 
         self.conv = nn.ModuleList()
         self.virt = nn.ModuleList()
         self.main = nn.ModuleList()
         for layer in range(depth):
-            self.conv.append(ConvKernel(width, num_head, conv_hop, conv_kernel[layer], *WIDTH_EDGE) if conv_kernel[layer] > 0 else None)
+            self.conv.append(ConvKernel(width, num_head, conv_hop, conv_kernel[layer], *RESCALE_EDGE) if conv_kernel[layer] > 0 else None)
             self.virt.append(VirtKernel(width, num_head) if use_virt else None)
             if layer < depth-1:
-                self.main.append(MetaFormerBlock(width, num_head, *WIDTH_NODE, False, 'main'))
+                self.main.append(MetaFormerBlock(width, num_head, *RESCALE_NODE, False, 'main'))
             else:
-                self.main.append(MetaFormerBlock(width, num_head, *WIDTH_NODE, True, 'main'))
+                self.main.append(MetaFormerBlock(width, num_head, *RESCALE_NODE, True, 'main'))
 
         self.head = HeadBlock(width, num_head)
         print('#params:', np.sum([np.prod(p.shape) for n, p in self.named_parameters()]))

@@ -4,7 +4,7 @@ rm -rfv train-*
 clear
 
 dev=0
-for model in base321 tiny311 tiny311 tiny311 tiny311 tiny311 ; do
+for model in tiny321 tiny311 tiny311 tiny311 tiny311 tiny311; do
     logdir=train-$model-dev$dev
     mkdir -p $logdir
 
