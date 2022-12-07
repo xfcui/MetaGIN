@@ -156,7 +156,8 @@ def cast_transform(graph, nohydro=True):
         # remove hydrogen nodes
         mask = g['atom'].x[:, 0] > 1
         g['atom'].x = g['atom'].x[mask]
-        g['atom'].pos_3d = g['atom'].pos_3d[mask]
+        if len(g['atom'].pos_3d) > 0:
+            g['atom'].pos_3d = g['atom'].pos_3d[mask]
         g['atom'].pos_rw = g['atom'].pos_rw[mask]
         mask = pt.cumsum(mask.long(), 0) - 1
         g['bond'].edge_index = mask[g['bond'].edge_index]
