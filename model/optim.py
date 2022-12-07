@@ -12,23 +12,19 @@ def get_param(model, lr, wd, lr_min):
                     {'params': [], 'lr_max': lr/2, 'lr_min': lr_min/2, 'wd_max': wd*2}]  # 5:head
 
     for n, p in model.named_parameters():
-        if n.find('_encoder') > 0: param_groups[0]['params'].append(p)
-        elif n.endswith('scale'):  param_groups[1]['params'].append(p)
-        elif n.endswith('degree'): param_groups[2]['params'].append(p)
-        elif n.endswith('bias'):   param_groups[3]['params'].append(p)
-        elif n.find('head') > 0:   param_groups[5]['params'].append(p)
-        elif n.endswith('weight'): param_groups[4]['params'].append(p)
+        if n.find('_encoder') > 0:    param_groups[0]['params'].append(p)
+        elif n.find('dist_mean') > 0: param_groups[0]['params'].append(p)
+        elif n.find('dist_std')  > 0: param_groups[0]['params'].append(p)
+        elif n.endswith('scale'):     param_groups[1]['params'].append(p)
+        elif n.endswith('degree'):    param_groups[2]['params'].append(p)
+        elif n.endswith('bias'):      param_groups[3]['params'].append(p)
+        elif n.find('head') > 0:      param_groups[5]['params'].append(p)
+        elif n.endswith('weight'):    param_groups[4]['params'].append(p)
         else: raise Exception('Unknown parameter name:', n)
         for pg in param_groups: assert len(pg) > 0
 
     return param_groups
 
-def clamp_param(param, eps=1e-4):
-    with pt.no_grad():
-        for p in param[1]['params']:
-            p.clamp_(np.log(eps), 0)
-        for p in param[2]['params']:
-            p.clamp_(-1, 0)
 
 class Scheduler(object):
     def __init__(self, optim, lr_warmup=6, wd_warmup=12, cos_period=12):

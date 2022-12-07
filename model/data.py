@@ -106,6 +106,7 @@ def hetero_transform(graph):
     # output
     g = HeteroData()
     g['atom'].x = graph.x.short()
+    g['atom'].pos_3d = graph.pos_3d.half()
     g['atom'].pos_rw = graph.pos_rw.half()
     g['atom', 'bond', 'atom'].edge_index = hop1_idx.short()
     g['atom', 'bond', 'atom'].edge_attr = hop1_attr.short()
@@ -118,23 +119,49 @@ def hetero_transform(graph):
     return g
 
 
-def cast_transform(graph):
+def cast_transform(graph, nohydro=True):
     g = HeteroData()
     g['atom'].x = graph['atom'].x.long()
     g['atom'].x = pt.cat([g['atom'].x, ATOM2FEAT[g['atom'].x[:, 0]]], 1).long() + ATOM_CUMSIZE[:-1]
+    g['atom'].pos_3d = graph['atom'].pos_3d.float()
     g['atom'].pos_rw = graph['atom'].pos_rw.float()
-    g['atom', 'bond', 'atom'].edge_index = graph['bond'].edge_index.long()
-    g['atom', 'bond', 'atom'].edge_attr = graph['bond'].edge_attr.long() + BOND_CUMSIZE[:-1]
-    # remove hydrogen edges
-    mask = g['atom'].x[:, 0][graph['angle'].edge_index.long()] > 1
-    mask = mask[0] & mask[1]
-    g['atom', 'angle', 'atom'].edge_index = graph['angle'].edge_index[:, mask].long()
-    g['atom', 'angle', 'atom'].edge_attr = graph['angle'].edge_attr[mask].long()
-    # remove hydrogen edges
-    mask = g['atom'].x[:, 0][graph['torsion'].edge_index.long()] > 1
-    mask = mask[0] & mask[1]
-    g['atom', 'torsion', 'atom'].edge_index = graph['torsion'].edge_index[:, mask].long()
-    g['atom', 'torsion', 'atom'].edge_attr = graph['torsion'].edge_attr[mask].long()
+    if nohydro:
+        # remove hydrogen 1-hop edges
+        mask = g['atom'].x[:, 0][graph['bond'].edge_index.long()] > 1
+        mask = mask[0] & mask[1]
+        g['atom', 'bond', 'atom'].edge_index = graph['bond'].edge_index[:, mask].long()
+        g['atom', 'bond', 'atom'].edge_attr = graph['bond'].edge_attr[mask].long() + BOND_CUMSIZE[:-1]
+    else:
+        g['atom', 'bond', 'atom'].edge_index = graph['bond'].edge_index.long()
+        g['atom', 'bond', 'atom'].edge_attr = graph['bond'].edge_attr.long() + BOND_CUMSIZE[:-1]
+    if nohydro:
+        # remove hydrogen 2-hop edges
+        mask = g['atom'].x[:, 0][graph['angle'].edge_index.long()] > 1
+        mask = mask[0] & mask[1]
+        g['atom', 'angle', 'atom'].edge_index = graph['angle'].edge_index[:, mask].long()
+        g['atom', 'angle', 'atom'].edge_attr = graph['angle'].edge_attr[mask].long()
+    else:
+        g['atom', 'angle', 'atom'].edge_index = graph['angle'].edge_index.long()
+        g['atom', 'angle', 'atom'].edge_attr = graph['angle'].edge_attr.long()
+    if nohydro:
+        # remove hydrogen 3-hop edges
+        mask = g['atom'].x[:, 0][graph['torsion'].edge_index.long()] > 1
+        mask = mask[0] & mask[1]
+        g['atom', 'torsion', 'atom'].edge_index = graph['torsion'].edge_index[:, mask].long()
+        g['atom', 'torsion', 'atom'].edge_attr = graph['torsion'].edge_attr[mask].long()
+    else:
+        g['atom', 'torsion', 'atom'].edge_index = graph['torsion'].edge_index.long()
+        g['atom', 'torsion', 'atom'].edge_attr = graph['torsion'].edge_attr.long()
+    if nohydro:
+        # remove hydrogen nodes
+        mask = g['atom'].x[:, 0] > 1
+        g['atom'].x = g['atom'].x[mask]
+        g['atom'].pos_3d = g['atom'].pos_3d[mask]
+        g['atom'].pos_rw = g['atom'].pos_rw[mask]
+        mask = pt.cumsum(mask.long(), 0) - 1
+        g['bond'].edge_index = mask[g['bond'].edge_index]
+        g['angle'].edge_index = mask[g['angle'].edge_index]
+        g['torsion'].edge_index = mask[g['torsion'].edge_index]
     g.y = graph.y.float()
 
     return g
@@ -228,6 +255,10 @@ class PygPCQM4Mv2Dataset(InMemoryDataset):
         graph = dict()
         graph['num_nodes'] = num_nodes
         graph['node_feat'] = x
+        try:
+            graph['node_pos3d'] = mol.GetConformer().GetPositions().astype(np.float16)
+        except:
+            graph['node_pos3d'] = np.zeros([0, 3], dtype=np.float16)
         graph['edge_index'] = edge_index
         graph['edge_feat'] = edge_attr
         return graph 
@@ -245,11 +276,29 @@ class PygPCQM4Mv2Dataset(InMemoryDataset):
         assert len(smiles_list) == size_dict
         assert len(homolumogap_list) == size_dict
 
+        try:
+            print('#loading SDF file ...')
+            data_sdf = Chem.SDMolSupplier(osp.join(self.raw_dir, 'embed3d-train.sdf'), removeHs=False)  # hydrogen
+            embed_list = []
+            for d in tqdm(data_sdf, total=len(split_dict['train'])):
+                embed_list.append(d)
+            print('#loaded:', len(embed_list), len(split_dict['train']))
+            assert len(embed_list) == len(split_dict['train'])
+            embed_list += [None] * (size_dict - len(embed_list))
+        except:
+            embed_list = [None] * size_dict
+        print('#padded:', len(embed_list), size_dict)
+        assert len(embed_list) == size_dict
+
         print('#converting molecules into graphs...')
         data_list = []
-        for smiles, homolumogap in tqdm(zip(smiles_list, homolumogap_list), total=size_dict):
-            molecule = Chem.MolFromSmiles(smiles)
-            graph = self.molecule2graph(molecule)
+        for smiles, embed, homolumogap in tqdm(zip(smiles_list, embed_list, homolumogap_list), total=size_dict):
+            if embed is None:
+                molecule = Chem.MolFromSmiles(smiles)
+                molecule = Chem.AddHs(molecule)  # hydrogen
+                graph = self.molecule2graph(molecule)
+            else:
+                graph = self.molecule2graph(embed)
             assert(len(graph['edge_feat']) == graph['edge_index'].shape[1])
             assert(len(graph['node_feat']) == graph['num_nodes'])
 
@@ -257,6 +306,7 @@ class PygPCQM4Mv2Dataset(InMemoryDataset):
             data.edge_index = pt.from_numpy(graph['edge_index']).long()
             data.edge_attr = pt.from_numpy(graph['edge_feat']).short()
             data.x = pt.from_numpy(graph['node_feat']).short()
+            data.pos_3d = pt.from_numpy(graph['node_pos3d']).half()
             addPosRW(data)
             data.y = pt.Tensor([homolumogap]).half()
             if self.pre_transform is not None:
@@ -296,7 +346,7 @@ if __name__=="__main__":
     print('#data:', g0)
     print('#atom:', g0['atom'].x[:12])
     for k in ['atom']:
-        print('#dtype:', k, g0[k].x.dtype, g0[k].pos_rw.dtype)
+        print('#dtype:', k, g0[k].x.dtype, g0[k].pos_3d.dtype, g0[k].pos_rw.dtype)
     print('#bond:', g0['bond'].edge_attr[:12])
     for k in ['bond', 'angle', 'torsion']:
         print('#dtype:', k, g0[k].edge_index.dtype, g0[k].edge_attr.dtype)

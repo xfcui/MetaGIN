@@ -12,7 +12,7 @@ from torch_geometric.loader import DataLoader
 from adan import Adan
 
 from model import MetaGIN
-from optim import get_param, clamp_param, Scheduler
+from optim import get_param, Scheduler
 
 
 parser = argparse.ArgumentParser(description='GNN baselines on pcqm4m with Pytorch Geometrics')
@@ -55,25 +55,32 @@ sched = Scheduler(optim, cos_period//2, cos_period*2, cos_period)
 print('#optim:', '%.2e'%lr_base, '%.2e'%wd_base, cos_period, num_period)
 
 
-loss_fn = pt.nn.L1Loss()
+loss0_fn = pt.nn.L1Loss()
+loss1_fn = pt.nn.SmoothL1Loss(beta=0.05)  # check noise level in model.py
 def train(model, loader, optim, param):
     model.train()
-    loss_accum = 0
+    loss0_accum, loss1_accum = 0, 0
 
     optim.zero_grad()
     for step, batch in enumerate(tqdm(loader, desc="Iteration")):
         batch = batch.cuda()
 
-        pred = model(batch)
-        loss = loss_fn(pred.view(-1,), batch.y)
+        pred, dpred, dtrue = model(batch)
+        with pt.no_grad():
+            dpred.clamp_(0.5, 5.0)      # check min-max values in model.py
+            dtrue.clamp_(0.5, 5.0)      # check min-max values in model.py
+        loss0 = loss0_fn(pred.view(-1,), batch.y)
+        loss1 = loss1_fn(dpred.log().view(-1,), dtrue.log().view(-1,))
+        loss  = loss0 + loss1/4
         loss.backward()
         optim.step()
-        clamp_param(param)
+        with pt.no_grad(): model.clamp_()
 
-        loss_accum += loss.detach().cpu().item()
+        loss0_accum += loss0.detach().cpu().item()
+        loss1_accum += loss1.detach().cpu().item()
         optim.zero_grad()
 
-    return loss_accum / (step + 1)
+    return loss0_accum / (step + 1), loss1_accum / (step + 1) * 2
 
 def eval(model, loader, evaluator):
     model.eval()
@@ -118,15 +125,15 @@ print(); print('#training...')
 best_mae, best_epoch, test_epoch, t0 = 9999, -1, -1, time()
 for epoch in range(cos_period*num_period):
     epoch_lr, epoch_wd = sched.step(epoch)
-    train_mae = train(model, train_loader, optim, param)
+    train_mae, loss_dist = train(model, train_loader, optim, param)
     valid_mae = eval(model, valid_loader, dataeval)
     eta = (time() - t0) / (epoch + 1) * (cos_period * num_period - epoch - 1) / 3600
 
     if valid_mae < best_mae:
         best_mae, best_epoch = valid_mae, epoch
-        print('#epoch[%d]: %.4f %.4f %.2e %.2e %.1fh *' % (epoch, train_mae, valid_mae, epoch_lr, epoch_wd, eta))
+        print('#epoch[%d]: %.4f %.4f %.4f %.2e %.2e %.1fh *' % (epoch, loss_dist, train_mae, valid_mae, epoch_lr, epoch_wd, eta))
     else:
-        print('#epoch[%d]: %.4f %.4f %.2e %.2e %.1fh' % (epoch, train_mae, valid_mae, epoch_lr, epoch_wd, eta))
+        print('#epoch[%d]: %.4f %.4f %.4f %.2e %.2e %.1fh' % (epoch, loss_dist, train_mae, valid_mae, epoch_lr, epoch_wd, eta))
 
     if args.save != '':
         pt.save(model.state_dict(), args.save + '/model%03d.pt' % epoch)
