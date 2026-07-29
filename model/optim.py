@@ -1,9 +1,15 @@
+"""Parameter groups and LR/WD schedule for MetaGIN training.
+
+Unknown parameter names raise (fail-loud), matching the CoAtGIN discipline.
+"""
+
 import numpy as np
 import torch as pt
 import torch.nn.functional as nnf
 
 
 def get_param(model, lr, wd, lr_min):
+    """Classify named parameters into Adan groups with per-group lr/wd bounds."""
     param_groups = [{'params': [], 'lr_max': lr/2, 'lr_min': lr_min/2, 'wd_max': 0},     # 0:embed
                     {'params': [], 'lr_max': lr,   'lr_min': lr_min,   'wd_max': 0},     # 1:scale with clamp
                     {'params': [], 'lr_max': lr,   'lr_min': lr_min,   'wd_max': 0},     # 2:degree with clamp
@@ -27,6 +33,8 @@ def get_param(model, lr, wd, lr_min):
 
 
 class Scheduler(object):
+    """Warmup LR → warmup WD → multi-period cosine decay on weight groups."""
+
     def __init__(self, optim, lr_warmup=6, wd_warmup=12, cos_period=12):
         super().__init__()
         self.optim = optim
@@ -36,6 +44,7 @@ class Scheduler(object):
         self.cos_period = cos_period
 
     def step(self, epoch):
+        """Update optimizer groups for ``epoch``; return (weight_lr, weight_wd)."""
         if epoch == 0:
             for pg in self.optim.param_groups:
                 pg['lr'] = pg['lr_max'] / 1e4

@@ -1,8 +1,14 @@
+"""MetaGIN building blocks: multi-hop conv, virtual node, MetaFormer, optional kNN.
+
+Paper: Zhang et al., Frontiers of Computer Science 2025.
+  https://link.springer.com/article/10.1007/s11704-024-3784-y
+  https://doi.org/10.1007/s11704-024-3784-y
+"""
+
 import numpy as np
 import torch as pt
 import torch.nn as nn
 import torch.nn.parameter as nnp
-import torch.nn.functional as nnf
 
 from torch_scatter import scatter
 from torch_geometric.utils import degree
@@ -18,7 +24,7 @@ DROPOUT    = 0.1
 EMBED_KNN  = 10          # 50% 8; 75% 10; 90% 12; 95% 13; 99% 14; max 19
 EMBED_POS  = 16          # random walk positional embedding
 EMBED_ATOM = 138         # zero for masked
-EMBED_BOND = [33, 3, 4]  # zero for masked
+EMBED_BOND = [33, 3, 4]  # bond / angle / torsion embedding sizes (0 = pad)
 EMBED_DIST = 8           # zero for self-loop
 RESCALE_GRAPH, RESCALE_NODE, RESCALE_EDGE = (2, 4), (1, 3), (1, 2)
 
@@ -26,6 +32,8 @@ RESCALE_GRAPH, RESCALE_NODE, RESCALE_EDGE = (2, 4), (1, 3), (1, 2)
 # ReZero: https://arxiv.org/abs/2003.04887
 # LayerScale: https://arxiv.org/abs/2103.17239
 class ScaleLayer(nn.Module):
+    """Learnable per-channel multiplicative scale, log-parameterized and clamped."""
+
     def __init__(self, width, scale_init):
         super().__init__()
         self.scale = nnp.Parameter(pt.zeros(width) + np.log(scale_init))
@@ -39,6 +47,8 @@ class ScaleLayer(nn.Module):
 # PNA: https://arxiv.org/abs/2004.05718
 # Graphormer: https://arxiv.org/abs/2106.05234
 class DegreeLayer(nn.Module):
+    """Learnable degree-power rescaling: ``deg ** degree * x``."""
+
     def __init__(self, width, degree_init=-1e-2):
         super().__init__()
         self.degree = nnp.Parameter(pt.zeros(width) + degree_init)
@@ -53,6 +63,8 @@ class DegreeLayer(nn.Module):
 # GLU: https://arxiv.org/abs/1612.08083
 # GLU-variants: https://arxiv.org/abs/2002.05202
 class GatedLinearBlock(nn.Module):
+    """GLU-style mixer with GroupNorm; optional edge/gate bias and norm return."""
+
     def __init__(self, width, num_head, resca_norm=1, resca_act=1, skip_pre=False, width_in=None, width_out=None):
         super().__init__()
         assert width >= 256
@@ -88,6 +100,8 @@ class GatedLinearBlock(nn.Module):
 
 # MetaFormer: https://arxiv.org/abs/2210.13452
 class MetaFormerBlock(nn.Module):
+    """Scaled residual token mixer + GLU FFN (MetaFormer residual pattern)."""
+
     def __init__(self, width, num_head, resca_norm=1, resca_act=1, use_residual=True, name=None):
         super().__init__()
         self.width = width
@@ -116,6 +130,12 @@ class MetaFormerBlock(nn.Module):
 # VoVNet: https://arxiv.org/abs/1904.09730
 # GNN-AK: https://openreview.net/forum?id=Mspk_WYKoEH
 class ConvBlock(nn.Module):
+    """One hop of message passing: node-project → edge GLU → scatter → degree scale.
+
+    Linear maps run in node space; results are indexed to edges before the
+    nonlinearity, then summed to destinations.
+    """
+
     def __init__(self, width, num_head, bond_size):
         super().__init__()
         self.width = width
@@ -138,6 +158,8 @@ class ConvBlock(nn.Module):
         return xx
 
 class ConvKernel(nn.Module):
+    """VoVNet-style stack of ``kernel`` folds over ``hop`` edge types (bond/angle/torsion)."""
+
     def __init__(self, width, num_head, hop, kernel):
         super().__init__()
         self.width = width
@@ -176,6 +198,13 @@ knn_ext = pt.arange(2**width_ext).reshape(-1, 1).expand(-1, width_ext)
 knn_ext = knn_ext // (2**pt.arange(width_ext)) % 2 * infinity_ext
 knn_ext = knn_ext.cuda()
 class KnnKernel(nn.Module):
+    """Last-layer FAISS kNN message passing with train-time 3D distance auxiliary.
+
+    Builds a per-batch kNN graph in embedding space (batched via binary tags),
+    messages with RWPE bias, and optionally predicts pairwise distances for an
+    auxiliary loss. Distance features are training-only.
+    """
+
     def __init__(self, width, num_head, knn):
         super().__init__()
         self.width = width
@@ -187,9 +216,9 @@ class KnnKernel(nn.Module):
         self.pdist = nn.PairwiseDistance(p=2)
 
         resca_norm, resca_act = RESCALE_EDGE
-        # random walk positional embeding
+        # random walk positional embedding
         self.perw_ffn = GatedLinearBlock(width, num_head, resca_norm, resca_act, width_in=EMBED_POS*2)
-        # distance embeding for training only
+        # distance embedding for training only
         dist_nhead = width // 2
         dmin, dmax = np.log(0.5), np.log(5.0); drange = dmax - dmin
         self.dist_mean  = nnp.Parameter(pt.rand(dist_nhead) * drange + dmin)
@@ -242,6 +271,8 @@ class KnnKernel(nn.Module):
 
 # GIN-virtual: https://arxiv.org/abs/2103.09430
 class VirtKernel(nn.Module):
+    """Virtual-node route with recurrent residual accumulator ``virt_res``."""
+
     def __init__(self, width, num_head):
         super().__init__()
         self.width = width
@@ -256,6 +287,8 @@ class VirtKernel(nn.Module):
 
 
 class HeadBlock(nn.Module):
+    """Graph head: virtual MetaFormer + mean-pooled nodes → scaled scalar gap."""
+
     def __init__(self, width, num_head):
         super().__init__()
         self.width = width
@@ -280,6 +313,24 @@ class HeadBlock(nn.Module):
 # GIN: https://openreview.net/forum?id=ryGs6iA5Km
 # Graph PE: https://arxiv.org/abs/2110.07875
 class MetaGIN(nn.Module):
+    """MetaGIN encoder + regression head for PCQM4Mv2 HOMO–LUMO gaps.
+
+    Stem: atom embedding + RWPE, one ``ConvKernel``, MetaFormer. Then ``depth``
+    layers of ``ConvKernel`` (or last-layer ``KnnKernel``) + optional
+    ``VirtKernel`` + MetaFormer. Head pools to a scalar gap.
+
+    Args:
+        depth: number of main layers after the stem.
+        num_head: attention/GLU head count; width = ``num_head * dim_head``.
+        conv_hop: hops used in each ``ConvKernel`` (1–3).
+        conv_kernel: per-layer VoVNet fold counts (length ``depth``; last entry
+            unused because the final layer is ``KnnKernel``).
+        use_virt: enable virtual-node route.
+        dim_head: channels per head (default: ``num_head``).
+
+    Training forward returns ``(gap, dist_pred, dist_true)``; eval returns gap only.
+    """
+
     def __init__(self, depth, num_head, conv_hop, conv_kernel, use_virt, dim_head=None):
         super().__init__()
         self.depth = depth
@@ -317,6 +368,7 @@ class MetaGIN(nn.Module):
         self.head.clamp_()
 
     def getEdge(self, graph, batch, batch_size):
+        """Pack bond / angle / torsion edge tensors and destination degrees."""
         idx1, attr1 = graph['bond'].edge_index, graph['bond'].edge_attr
         deg1 = degree(idx1[1], graph.num_nodes).float(); deg1.clamp_(1, None)
         edge = [[idx1, attr1, deg1]]

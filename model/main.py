@@ -1,3 +1,11 @@
+"""Train / evaluate MetaGIN on PCQM4Mv2 (OGB-LSC).
+
+Paper: https://link.springer.com/article/10.1007/s11704-024-3784-y
+Run from this directory so ``data/`` and local imports resolve:
+
+    python3 -BuW ignore main.py --model tiny311 --save .
+"""
+
 import re
 import argparse
 from time import time
@@ -15,11 +23,12 @@ from model import MetaGIN
 from optim import get_param, Scheduler
 
 
-parser = argparse.ArgumentParser(description='GNN baselines on pcqm4m with Pytorch Geometrics')
+parser = argparse.ArgumentParser(
+    description='MetaGIN on PCQM4Mv2 (https://link.springer.com/article/10.1007/s11704-024-3784-y)')
 parser.add_argument('--model', type=str, default='tiny311',
-                    help='model tiny311, base321 or large321 (default: tiny311)')
+                    help='preset: tiny311|base321|large321 (size+hop+kernel+virt; default: tiny311)')
 parser.add_argument('--save', type=str, default='',
-                    help='directory to save checkpoint')
+                    help='directory for modelXXX.pt checkpoints and OGB test-dev submission')
 args = parser.parse_args()
 
 if args.model.startswith('tiny'):
@@ -56,8 +65,9 @@ print('#optim:', '%.2e'%lr_base, '%.2e'%wd_base, cos_period, num_period)
 
 
 loss0_fn = pt.nn.L1Loss()
-loss1_fn = pt.nn.SmoothL1Loss(beta=0.05)  # check noise level in model.py
+loss1_fn = pt.nn.SmoothL1Loss(beta=0.05)  # distance aux; clamp range matches KnnKernel
 def train(model, loader, optim, param):
+    """One training epoch; returns (gap L1, scaled distance aux)."""
     model.train()
     loss0_accum, loss1_accum = 0, 0
 
@@ -67,8 +77,8 @@ def train(model, loader, optim, param):
 
         pred, dpred, dtrue = model(batch)
         with pt.no_grad():
-            dpred.clamp_(0.5, 5.0)      # check min-max values in model.py
-            dtrue.clamp_(0.5, 5.0)      # check min-max values in model.py
+            dpred.clamp_(0.5, 5.0)
+            dtrue.clamp_(0.5, 5.0)
         loss0 = loss0_fn(pred.view(-1,), batch.y)
         loss1 = loss1_fn(dpred.log().view(-1,), dtrue.log().view(-1,))
         loss  = loss0 + loss1/4
@@ -83,6 +93,7 @@ def train(model, loader, optim, param):
     return loss0_accum / (step + 1), loss1_accum / (step + 1) * 2
 
 def eval(model, loader, evaluator):
+    """Validation MAE via ``PCQM4Mv2Evaluator``."""
     model.eval()
     y_true = []
     y_pred = []
@@ -103,6 +114,7 @@ def eval(model, loader, evaluator):
     return evaluator.eval(input_dict)["mae"]
 
 def test(model, statefn, loader):
+    """Load ``statefn`` and collect test-dev predictions for an OGB submission."""
     model_copy = deepcopy(model).cuda()
     model_copy.load_state_dict(pt.load(statefn))
     model_copy.eval()

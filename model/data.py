@@ -1,3 +1,16 @@
+"""PCQM4Mv2 dataset with bond / angle / torsion edges for MetaGIN.
+
+Builds a heterogeneous graph per molecule:
+  atom nodes with OGB (+extra) features, RWPE, optional 3D coords;
+  1-hop bond, 2-hop angle, and 3-hop torsion edges.
+
+Paper: https://link.springer.com/article/10.1007/s11704-024-3784-y
+
+Preprocess (from this directory):
+
+    python3 -BuW ignore data.py
+"""
+
 import os
 import os.path as osp
 import shutil
@@ -48,6 +61,7 @@ BOND_CUMSIZE = pt.from_numpy(np.array([1] + BOND_SIZE).cumsum())
 
 
 def hetero_transform(graph):
+    """Expand a homogeneous OGB graph into bond / angle / torsion HeteroData."""
     # input
     size = graph.num_nodes
     head = [graph.edge_index[0] == i for i in range(size)]
@@ -120,6 +134,7 @@ def hetero_transform(graph):
 
 
 def cast_transform(graph, nohydro=True):
+    """Cast compact stored tensors to training dtypes; optionally drop hydrogens."""
     g = HeteroData()
     g['atom'].x = graph['atom'].x.long()
     g['atom'].x = pt.cat([g['atom'].x, ATOM2FEAT[g['atom'].x[:, 0]]], 1).long() + ATOM_CUMSIZE[:-1]
@@ -169,11 +184,15 @@ def cast_transform(graph, nohydro=True):
 
 
 class PygPCQM4Mv2Dataset(InMemoryDataset):
+    """PyG InMemoryDataset for MetaGIN-featurized PCQM4Mv2 under ``root/pcqm4m-metagin``."""
+
     def __init__(self, root='data', transform=None, pre_transform=None):
-        '''
-            Pytorch Geometric PCQM4Mv2 dataset object
-                - root (str): the dataset folder will be located at root/pcqm4m_kddcup2021
-        '''
+        """
+        Args:
+            root: parent data directory; processed graphs live in ``root/pcqm4m-metagin``.
+            transform: applied at access time (default ``cast_transform`` in module use).
+            pre_transform: applied once at processing (hetero + RWPE).
+        """
 
         self.original_root = root
         self.folder = osp.join(root, 'pcqm4m-metagin')
